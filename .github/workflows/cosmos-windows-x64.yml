@@ -1,0 +1,102 @@
+name: Cosmos Windows x64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Cosmos Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: benjlevesque/short-sha@v2.2
+        id: short-sha
+        with:
+          length: 7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          install: >-
+            base-devel
+            git
+            ruby
+            vim
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-gcc
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Restore dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            windows/build-mingw64
+            windows/downloads
+          key: win-${{ hashFiles('windows/Makefile') }}
+
+      - name: Build all dependencies
+        shell: msys2 {0}
+        run: |
+          cd windows
+          make
+
+      - name: Build Cosmos exe
+        shell: msys2 {0}
+        run: |
+          source windows/vars.sh
+          meson setup build
+          cd build
+          ninja
+          strip ./mkxp-z.exe
+
+      - name: Prepare Cosmos archive
+        shell: msys2 {0}
+        run: |
+          mkdir build/artifact
+          cd build/artifact
+          cp /mingw64/bin/zlib1.dll .
+          cp ../../windows/build-mingw64/bin/x64-msvcrt-ruby310.dll .
+          cp -r ../../windows/build-mingw64/lib/ruby/3.1.0 .
+          mv ./3.1.0 ./stdlib
+          cp ../mkxp-z.exe ./mkxp-z-Cosmos.x86_64.exe
+          cp ../../mkxp.json .
+          cp -r ../../scripts .
+          cp ../../assets/LICENSE.mkxp-z-with-https.txt .
+
+      - name: Check for DLLs missing from the artifact
+        shell: msys2 {0}
+        run: |
+          cd build/artifact
+          error_flag=
+
+          for file in *.exe *.dll
+          do
+            ldd_output="$(ldd "$file")"
+            echo "$file"
+            echo "$ldd_output"
+            while IFS= read -r line
+            do
+              dll_name="$(echo "$line" | sed -e 's/=>/|/g' | cut -d '|' -f 1 | sed -e 's/^[ \t]*//g' -e 's/[ \t]*$//g')"
+              dll_location="$(echo "$line" | sed -e 's/=>/|/g' | cut -d '|' -f 2 | sed -e 's/^[ \t]*//g' -e 's/[ \t]*$//g')"
+              if [[ "$dll_location" = 'not found'* ]] || [[ "$dll_location" = '/mingw64/bin/'* ]] || [[ "$dll_location" = '/mingw64/lib/'* ]] || [[ "$dll_location" = '/mingw64/usr/bin/'* ]] || [[ "$dll_location" = '/mingw64/usr/lib/'* ]]
+              then
+                error_flag=1
+                echo "::error::$dll_name is missing from the artifact"
+              fi
+            done <<< "$ldd_output"
+          done
+
+          if [ -n "$error_flag" ]
+          then
+            exit 1
+          fi
+
+      - name: Upload Cosmos Windows x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: mkxp-z-Cosmos.windows.x86_64-${{ steps.short-sha.outputs.sha }}
+          path: build/artifact
