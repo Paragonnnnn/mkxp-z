@@ -1,184 +1,197 @@
-physfs = dependency('physfs', version: '>=2.1', static: build_static)
-openal = dependency('openal', static: build_static, method: 'pkg-config')
-theora = dependency('theora', static: build_static)
-vorbisfile = dependency('vorbisfile', static: build_static)
-vorbis = dependency('vorbis', static: build_static)
-ogg = dependency('ogg', static: build_static)
-sdl2 = dependency('SDL2', static: build_static)
-sdl_sound = compilers['cpp'].find_library('SDL2_sound')
-sdl2_ttf = dependency('SDL2_ttf', static: build_static)
-freetype = dependency('freetype2', static: build_static)
-pixman = dependency('pixman-1', static: build_static)
-png = dependency('libpng', static: build_static)
-zlib = dependency('zlib', static: build_static)
-uchardet = dependency('uchardet', static: build_static)
+project('mkxp-z', 'c', 'cpp', version: '2.4.2', meson_version: '>=0.56.0', default_options: ['cpp_std=c++14', 'buildtype=release'])
 
-# As no pkg-config file is generated for static sdl2_image, and pkg-config is
-# the default option for meson detecting dependencies, pkg-config will fail to
-# find sdl2_image.pc in the build's lib/pkgconfig folder and instead pull it
-# from the locally installed packages if it exists.
-# To work around this, we first check to see if cmake can find our sdl2_image
-# sub project and use that, then check using pkg-config as normal if we are not
-# building the sub project.
-# It looks like upstream SDL_image fixed this for SDL3, so we can hopefully
-# remove this workaround after eventually upgrading to SDL3.
-sdl2_image = dependency('SDL2_image', modules: ['SDL2_image::SDL2_image-static', 'SDL2_image::brotlidec-static', 'SDL2_image::brotlicommon-static', 'SDL2_image::hwy', 'SDL2_image::jxl_dec-static'], static: build_static, method: 'cmake', required: false)
-if sdl2_image.found() == false
-    sdl2_image = dependency('SDL2_image', modules: ['SDL2_image::SDL2_image-static', 'SDL2_image::brotlidec-static', 'SDL2_image::brotlicommon-static', 'SDL2_image::hwy', 'SDL2_image::jxl_dec-static'], static: build_static)
+host_system = host_machine.system()
+
+if host_system == 'darwin'
+    error('\nThis Meson project no longer supports macOS. Please use the Xcode project instead.')
 endif
 
+xxd = find_program('xxd', native: true)
+
+git_hash = run_command('git', 'rev-parse', '--short', 'HEAD').stdout().strip()
+
+compilers = {'cpp': meson.get_compiler('cpp')}
+
+global_sources = []
+global_dependencies = []
+global_include_dirs = []
+global_args = []
+global_link_args = []
+
+sizeof = {'void*': compilers['cpp'].sizeof('void*'),
+          'long': compilers['cpp'].sizeof('long')
+         }
+win64 = (sizeof['void*'] != sizeof['long'])
+
+global_args += '-DMKXPZ_BUILD_MESON'
+global_args += '-DMKXPZ_VERSION="@0@"'.format(meson.project_version())
+global_args += '-DMKXPZ_GIT_HASH="@0@"'.format(git_hash)
+global_args += '-DHAVE_NANOSLEEP'
+# ====================
+# Ext libs
+# ====================
+
+# STEAMWORKS
+
+steamworks = false
+steamworks_path = get_option('steamworks_path')
+if steamworks_path != ''
+    libname = 'steam_api'
+    if host_system == 'linux'
+        if sizeof['void*'] == 4
+            bindir = 'linux32'
+        else
+            bindir = 'linux64'
+        endif
+    else
+        if win64 == true
+            bindir = 'win64'
+            libname += '64'
+        else
+            bindir = ''
+        endif
+    endif
+
+    steam_libpath = steamworks_path + '/redistributable_bin/' + bindir
+    steamlib = compilers['cpp'].find_library(libname, required: false, dirs: [steam_libpath])
+
+    if steamlib.found() == true
+        global_include_dirs += include_directories('steamshim')
+        global_args += '-DMKXPZ_STEAM'
+        global_sources += 'steamshim/steamshim_child.c'
+        steamworks = true
+    endif
+endif
+
+# GLES
+gfx_backend = get_option('gfx_backend')
+if gfx_backend == 'gles'
+    # Needs to be manually set up for now
+    global_args += '-DGLES2_HEADER'
+elif gfx_backend == 'gl'
+    global_dependencies += dependency('gl')
+    # boop
+endif
+
+# ====================
+# Main source
+# ====================
+
+# Suppress warnings
+global_args += ['-Wno-non-virtual-dtor', '-Wno-reorder', '-Wno-uninitialized', '-Wno-unknown-pragmas', '-Wno-stringop-truncation']
+if compilers['cpp'].get_id() == 'clang'
+    global_args += ['-Wno-undefined-var-template', '-Wno-delete-non-abstract-non-virtual-dtor']
+endif
 if host_system == 'windows'
-    bz2 = dependency('bzip2', static: build_static)
-    iconv = compilers['cpp'].find_library('iconv', static: build_static)
+    if compilers['cpp'].get_id() != 'clang'
+        global_args += '-masm=intel'
+    endif
+endif
+
+# Decide whether or not to use MiniFFI
+miniffi = get_option('use_miniffi')
+if miniffi == true
+    miniffi = true
+    global_args += '-DMKXPZ_MINIFFI'
+endif
+
+# Defines
+if get_option('workdir_current')
+    global_args += '-DWORKDIR_CURRENT'
+endif
+
+if get_option('cxx11_experimental') == true
+    global_args += '-DMKXPZ_EXP_FS'
+endif
+
+if get_option('force32') == true
+    global_args += '-m32'
+endif
+
+build_static = false
+if get_option('static_executable') == true
+    build_static = true
+endif
+
+global_args += '-DMKXPZ_INIT_GL_LATER'
+
+subdir('src')
+subdir('binding')
+subdir('shader')
+subdir('assets')
+
+global_include_dirs += include_directories('src', 'binding')
+
+rpath = ''
+
+if host_system == 'windows'
+    windows_resource_directory = '../' + get_option('windows_resource_directory')
+    subdir('windows')
+    global_sources += windows_resources
+    global_include_dirs += include_directories('windows')
 else
-    bz2 = compilers['cpp'].find_library('bz2')
-    # FIXME: Specifically asking for static doesn't work if iconv isn't
-    # installed in the system prefix somewhere
-    iconv = compilers['cpp'].find_library('iconv')
-    global_dependencies += compilers['cpp'].find_library('charset')
+    subdir('linux')
+    rpath = '$ORIGIN/lib'
+    if get_option('appimage') != true
+        if sizeof['long'] == 8 and get_option('force32') != true
+            rpath += '64'
+        else
+            rpath += '32'
+        endif
+    endif
 endif
 
-# If OpenSSL is present, you get HTTPS support
-if get_option('enable-https') == true
-    openssl = dependency('openssl', required: false, static: build_static)
-    if openssl.found() == true
-        global_dependencies += openssl
-        global_args += '-DMKXPZ_SSL'
+exe_name = meson.project_name()
+
+if host_system == 'linux' and get_option('appimage') == false
+    exe_name += '.' + host_machine.cpu()
+endif
+
+if steamworks == true
+    exe_name = 'steam_' + exe_name
+    la = ''
+    if build_static == true
         if host_system == 'windows'
-            global_link_args += '-lcrypt32'
+            la = '-static'
+        else
+            la = '-static-libgcc -static-libstdc++'
         endif
+    endif
+
+    shim_args = [
+        '-DGAME_LAUNCH_NAME="' + exe_name + '"',
+        '-I' + steamworks_path + '/public'
+        ]
+
+    if get_option('steam_appid') != ''
+        shim_args += '-DSTEAM_APPID=' + get_option('steam_appid')
+    endif
+
+    if get_option('steamshim_debug') == true
+        shim_args += '-DSTEAMSHIM_DEBUG'
+        shim_ws = 'console'
     else
-        warning('Could not locate OpenSSL. HTTPS will be disabled.')
+        shim_ws = 'windows'
     endif
+
+    executable(meson.project_name(),
+        sources: files('steamshim/steamshim_parent.cpp'),
+        dependencies: steamlib,
+        cpp_args: shim_args,
+        link_args: la.split(),
+        win_subsystem: shim_ws,
+        install: (host_system != 'windows'))
 endif
 
-# Windows needs to be treated like a special needs child here
-explicit_libs = ''
-if host_system == 'windows'
-    # Newer versions of Ruby will refuse to link without these
-    explicit_libs += 'libmsvcrt;libgcc;libmingwex;libgmp;'
-endif
-if build_static == true
-    if host_system == 'windows'
-        # '-static-libgcc', '-static-libstdc++' are here to avoid needing to ship a separate libgcc_s_seh-1.dll on Windows; it still works without those flags if you have the dll.
-        global_link_args += ['-static-libgcc', '-static-libstdc++', '-Wl,-Bstatic', '-lgcc', '-lstdc++', '-lpthread', '-Wl,-Bdynamic']
-    else
-        global_link_args += ['-static-libgcc', '-static-libstdc++']
-    endif
-    global_args += '-DAL_LIBTYPE_STATIC'
-endif
-
-foreach l : explicit_libs.split(';')
-        if l != ''
-            global_link_args += '-l:' + l + '.a'
-        endif
-endforeach
-
-alcdev_struct = 'ALCdevice_struct'
-if openal.type_name() == 'pkgconfig'
-    if openal.version().version_compare('>=1.20.1')
-        alcdev_struct = 'ALCdevice'
-    endif
-endif
-
-global_args += '-DMKXPZ_ALCDEVICE=' + alcdev_struct
-
-
-global_include_dirs += include_directories('.',
-    'audio',
-    'crypto',
-    'display', 'display/gl', 'display/libnsgif', 'display/libnsgif/utils',
-    'etc',
-    'filesystem', 'filesystem/ghc',
-    'input',
-    'net',
-    'system',
-    'util', 'util/sigslot', 'util/sigslot/adapter'
+executable(exe_name,
+    sources: global_sources,
+    dependencies: global_dependencies,
+    include_directories: global_include_dirs,
+    install_rpath: rpath,
+    link_args: global_link_args,
+    cpp_args: global_args,
+    objc_args: global_args,
+    objcpp_args: global_args,
+    win_subsystem: 'windows',
+    install: (host_system != 'windows')
 )
-
-global_dependencies += [openal, zlib, bz2, sdl2, sdl_sound, pixman, physfs, theora, vorbisfile, vorbis, ogg, sdl2_ttf, freetype, sdl2_image, png, iconv, uchardet]
-if host_system == 'windows'
-    global_dependencies += compilers['cpp'].find_library('wsock32')
-    global_dependencies += compilers['cpp'].find_library('gdi32')
-endif
-
-if get_option('shared_fluid') == true
-    fluidsynth = dependency('fluidsynth', static: build_static)
-    add_project_arguments('-DSHARED_FLUID', language: 'cpp')
-    global_dependencies += fluidsynth
-    if host_system == 'windows'
-        global_dependencies += compilers['cpp'].find_library('dsound')
-    endif
-endif
-
-if get_option('cjk_fallback_font') == true
-    add_project_arguments('-DMKXPZ_CJK_FONT', language: 'cpp')
-endif
-
-main_source = files(
-    'main.cpp',
-    'config.cpp',
-    'eventthread.cpp',
-    'settingsmenu.cpp',
-    'sharedstate.cpp',
-    
-    'audio/alstream.cpp',
-    'audio/audio.cpp',
-    'audio/audiostream.cpp',
-    'audio/fluid-fun.cpp',
-    'audio/midisource.cpp',
-    'audio/sdlsoundsource.cpp',
-    'audio/soundemitter.cpp',
-    'audio/vorbissource.cpp',
-    'theoraplay/theoraplay.c',
-
-    'crypto/rgssad.cpp',
-
-    'display/autotiles.cpp',
-    'display/autotilesvx.cpp',
-    'display/bitmap.cpp',
-    'display/font.cpp',
-    'display/cosmos_gdi_text.cpp',
-    'display/graphics.cpp',
-    'display/plane.cpp',
-    'display/sprite.cpp',
-    'display/tilemap.cpp',
-    'display/tilemapvx.cpp',
-    'display/viewport.cpp',
-    'display/window.cpp',
-    'display/windowvx.cpp',
-
-    'display/libnsgif/libnsgif.c',
-    'display/libnsgif/lzw.c',
-
-    'display/gl/gl-debug.cpp',
-    'display/gl/gl-fun.cpp',
-    'display/gl/gl-meta.cpp',
-    'display/gl/glstate.cpp',
-    'display/gl/scene.cpp',
-    'display/gl/shader.cpp',
-    'display/gl/texpool.cpp',
-    'display/gl/tileatlas.cpp',
-    'display/gl/tileatlasvx.cpp',
-    'display/gl/tilequad.cpp',
-    'display/gl/vertex.cpp',
-
-    'util/iniconfig.cpp',
-    'util/win-consoleutils.cpp',
-    
-    'etc/etc.cpp',
-    'etc/table.cpp',
-
-    'filesystem/filesystem.cpp',
-    'filesystem/filesystemImpl.cpp',
-    
-    'input/input.cpp',
-    'input/keybindings.cpp',
-
-    'net/LUrlParser.cpp',
-    'net/net.cpp',
-
-    'system/systemImpl.cpp'
-)
-
-global_sources += main_source
